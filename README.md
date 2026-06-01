@@ -9,8 +9,7 @@ A small remote screenshot system with three core pieces:
 ## System overview
 
 1. A client first requests a JWT from `POST /api/gate/token` using `X-Gate-Secret`.
-2. The client calls `GET /api/screenshot` with `Authorization: ******
-3. The server sends a WebSocket capture command to the connected grabber and includes a generated `request_id`.
+2. The client calls `GET /api/screenshot` with `Authorization: ******3. The server sends a WebSocket capture command to the connected grabber and includes a generated `request_id`.
 4. The grabber captures a frame, computes SSIM scores against each configured reference image, and decides `pass` or `fail`.
 5. The grabber sends two WebSocket messages back on the existing connection:
    - the JPEG image as a binary message

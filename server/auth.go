@@ -49,6 +49,9 @@ func verifyArgon2idHash(password, encodedHash string) error {
 		case "t":
 			iterations = uint32(v)
 		case "p":
+			if v > 255 {
+				return fmt.Errorf("invalid parallelism %d", v)
+			}
 			parallelism = uint8(v)
 		}
 	}

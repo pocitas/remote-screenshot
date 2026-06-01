@@ -264,12 +264,12 @@ func (s *serverState) handleFailedImages(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	relPath := filepath.Clean(strings.TrimPrefix(r.URL.Path, "/admin/failed-images/"))
-	if relPath == "." || filepath.IsAbs(relPath) || strings.HasPrefix(relPath, "..") {
+	relPath := strings.TrimPrefix(r.URL.Path, "/admin/failed-images/")
+	fullPath, err := resolveUnderBaseDir(s.failedImagesDir, relPath)
+	if err != nil {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
-	fullPath := filepath.Join(s.failedImagesDir, relPath)
 	http.ServeFile(w, r, fullPath)
 }
 
@@ -278,16 +278,40 @@ func (s *serverState) saveFailedImage(filename string, dataBase64 string) (strin
 	if err != nil {
 		return "", fmt.Errorf("decode base64: %w", err)
 	}
-	filename = filepath.Clean(filename)
-	if filename == "." || filepath.IsAbs(filename) || strings.HasPrefix(filename, "..") {
-		return "", fmt.Errorf("invalid filename")
+	fullPath, err := resolveUnderBaseDir(s.failedImagesDir, filename)
+	if err != nil {
+		return "", err
 	}
-	fullPath := filepath.Join(s.failedImagesDir, filename)
 	if err := os.MkdirAll(filepath.Dir(fullPath), 0o755); err != nil {
 		return "", fmt.Errorf("mkdir: %w", err)
 	}
 	if err := os.WriteFile(fullPath, imgBytes, 0o644); err != nil {
 		return "", fmt.Errorf("write file: %w", err)
 	}
-	return filename, nil
+	return filepath.ToSlash(filepath.Clean(filename)), nil
+}
+
+func resolveUnderBaseDir(baseDir, relativePath string) (string, error) {
+	cleaned := filepath.Clean(relativePath)
+	if cleaned == "." || filepath.IsAbs(cleaned) {
+		return "", fmt.Errorf("invalid path")
+	}
+
+	baseAbs, err := filepath.Abs(baseDir)
+	if err != nil {
+		return "", fmt.Errorf("abs base: %w", err)
+	}
+	fullPath := filepath.Join(baseAbs, cleaned)
+	fullAbs, err := filepath.Abs(fullPath)
+	if err != nil {
+		return "", fmt.Errorf("abs full path: %w", err)
+	}
+	rel, err := filepath.Rel(baseAbs, fullAbs)
+	if err != nil {
+		return "", fmt.Errorf("rel path: %w", err)
+	}
+	if rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		return "", fmt.Errorf("invalid path")
+	}
+	return fullAbs, nil
 }

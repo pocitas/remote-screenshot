@@ -46,3 +46,39 @@ func TestHandleCaptureResultMessageInvalidPayload(t *testing.T) {
 	default:
 	}
 }
+
+func TestHandleReferenceResultMessage(t *testing.T) {
+	state := &serverState{
+		pendingReference:      make(chan referenceResultMsg, 1),
+		pendingReferenceReqID: "ref-1",
+	}
+
+	handled := state.handleReferenceResultMessage([]byte(`{"type":"reference_result","request_id":"ref-1","status":"ok","action":"list_references","references":["a.jpg","b.jpg"]}`))
+	if !handled {
+		t.Fatalf("expected reference result message to be handled")
+	}
+
+	select {
+	case msg := <-state.pendingReference:
+		if msg.Status != "ok" {
+			t.Fatalf("unexpected status: %s", msg.Status)
+		}
+		if len(msg.References) != 2 {
+			t.Fatalf("unexpected references count: %d", len(msg.References))
+		}
+	default:
+		t.Fatalf("expected reference result to be queued")
+	}
+}
+
+func TestHandleReferenceResultMessageInvalidPayload(t *testing.T) {
+	state := &serverState{
+		pendingReference:      make(chan referenceResultMsg, 1),
+		pendingReferenceReqID: "ref-1",
+	}
+
+	handled := state.handleReferenceResultMessage([]byte(`{"type":"telemetry"}`))
+	if handled {
+		t.Fatalf("expected non reference_result payload to be ignored")
+	}
+}

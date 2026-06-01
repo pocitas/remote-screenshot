@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"log"
@@ -29,6 +30,11 @@ type serverState struct {
 	pendingCapture chan []byte
 
 	captureMu sync.Mutex
+
+	db                 *sql.DB
+	failedImagesDir    string
+	adminPasswordHash  string
+	adminSessionSecret []byte
 }
 
 var upgrader = websocket.Upgrader{
@@ -36,17 +42,37 @@ var upgrader = websocket.Upgrader{
 }
 
 func main() {
-	state := &serverState{
-		grabberPSK: envOrDefault("GRABBER_PSK", "change-me"),
-		gateSecret: envOrDefault("GATE_SECRET", "gate-secret"),
-		jwtSecret:  []byte(envOrDefault("JWT_SECRET", "jwt-secret")),
-		cacheTTL:   time.Minute,
+	dbPath := envOrDefault("DB_PATH", "validation.db")
+	db, err := openDB(dbPath)
+	if err != nil {
+		log.Fatalf("open db: %v", err)
 	}
+
+	state := &serverState{
+		grabberPSK:         envOrDefault("GRABBER_PSK", "change-me"),
+		gateSecret:         envOrDefault("GATE_SECRET", "gate-secret"),
+		jwtSecret:          []byte(envOrDefault("JWT_SECRET", "jwt-secret")),
+		cacheTTL:           time.Minute,
+		db:                 db,
+		failedImagesDir:    envOrDefault("FAILED_IMAGES_DIR", "failed-images"),
+		adminPasswordHash:  envOrDefault("ADMIN_PASSWORD_HASH", ""),
+		adminSessionSecret: []byte(envOrDefault("ADMIN_SESSION_SECRET", "")),
+	}
+
+	if err := os.MkdirAll(state.failedImagesDir, 0o755); err != nil {
+		log.Fatalf("mkdir failed images: %v", err)
+	}
+
+	state.startRetentionLoop()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws/grabber", state.handleGrabberWS)
 	mux.HandleFunc("/api/gate/token", state.handleGateToken)
 	mux.HandleFunc("/api/screenshot", state.handleScreenshot)
+	mux.HandleFunc("/admin/login", state.handleAdminLogin)
+	mux.HandleFunc("/admin/logout", state.handleAdminLogout)
+	mux.HandleFunc("/admin/logs", state.handleAdminLogs)
+	mux.HandleFunc("/admin/failed-images/", state.handleFailedImages)
 
 	addr := envOrDefault("ADDR", ":8080")
 	log.Printf("server listening on %s", addr)
@@ -102,20 +128,19 @@ func (s *serverState) readGrabberLoop(conn *websocket.Conn) {
 			return
 		}
 
-		if messageType != websocket.BinaryMessage {
-			continue
-		}
-
-		s.mu.Lock()
-		pending := s.pendingCapture
-		s.mu.Unlock()
-		if pending == nil {
-			continue
-		}
-
-		select {
-		case pending <- payload:
-		default:
+		if messageType == websocket.BinaryMessage {
+			s.mu.Lock()
+			pending := s.pendingCapture
+			s.mu.Unlock()
+			if pending == nil {
+				continue
+			}
+			select {
+			case pending <- payload:
+			default:
+			}
+		} else if messageType == websocket.TextMessage {
+			go s.handleTelemetryMessage(payload)
 		}
 	}
 }
@@ -224,7 +249,8 @@ func (s *serverState) getScreenshot(ctx context.Context) ([]byte, error) {
 		s.mu.Unlock()
 	}()
 
-	if err := conn.WriteJSON(map[string]string{"cmd": "capture"}); err != nil {
+	reqID := generateRandomToken()
+	if err := conn.WriteJSON(map[string]string{"cmd": "capture", "request_id": reqID}); err != nil {
 		return nil, err
 	}
 
@@ -262,6 +288,10 @@ func extractBearerToken(header string) (string, bool) {
 
 func withCORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/admin") {
+			next.ServeHTTP(w, r)
+			return
+		}
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Gate-Secret, X-Grabber-PSK")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")

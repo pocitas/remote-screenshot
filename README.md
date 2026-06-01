@@ -21,7 +21,7 @@ A small remote screenshot system with three core pieces:
 ### Grabber
 
 - `SERVER_WS_URL` - WebSocket endpoint for the server grabber connection. Default: `ws://localhost:8080/ws/grabber`
-- `GRABBER_PSK` - shared secret for authenticating the grabber. Default: `change-me`
+- `GRABBER_PSK` - shared secret for authenticating the grabber; **must exactly match server `GRABBER_PSK`**. Recommended minimum: 32 random bytes (64 preferred)
 - `GRABBER_ID` - optional operator-friendly identifier stored with telemetry (example: `pi-01`). Default: empty
 - `RECONNECT_DELAY_SECONDS` - reconnect wait after disconnect/error. Default: `5`
 - `SIMILARITY_THRESHOLD` - minimum SSIM score required to pass validation. Default: `0.80`
@@ -32,15 +32,37 @@ A small remote screenshot system with three core pieces:
 ### Server
 
 - `ADDR` - listen address. Default: `:8080`
-- `GRABBER_PSK` - shared secret expected from the grabber WebSocket connection. Default: `change-me`
-- `GATE_SECRET` - secret required by `POST /api/gate/token`. Default: `gate-secret`
-- `JWT_SECRET` - HMAC secret for screenshot API tokens
+- `GRABBER_PSK` - shared secret expected from the grabber WebSocket connection; **must exactly match grabber `GRABBER_PSK`**
+- `GATE_SECRET` - secret required by `POST /api/gate/token`; **must exactly match gate-app `PUBLIC_GATE_SECRET`**
+- `JWT_SECRET` - server-only HMAC secret for screenshot API tokens; do not expose in any client env
 - `DB_PATH` - SQLite database path for validation logs. Default: `validation.db`
 - `FAILED_IMAGES_DIR` - server-side storage path for failed images received through telemetry. Default: `failed-images`
-- `ADMIN_PASSWORD_HASH` - Argon2id PHC hash used for admin login. If empty, admin UI returns `503`
-- `ADMIN_SESSION_SECRET` - HMAC secret used to sign admin session cookies
+- `ADMIN_PASSWORD_HASH` - Argon2id PHC hash used for admin login (hash only, never plaintext password). If empty, admin UI returns `503`
+- `ADMIN_SESSION_SECRET` - server-only HMAC secret used to sign admin session cookies; independent from `JWT_SECRET`
 
 A sample configuration file is provided at [`.env.example`](./.env.example).
+
+## Secrets cheat sheet
+
+| Variable | Used by | Must match with | Private/public |
+| --- | --- | --- | --- |
+| `GRABBER_PSK` | Grabber + Server | `GRABBER_PSK` on both components (same exact value) | **Private shared secret** |
+| `GATE_SECRET` / `PUBLIC_GATE_SECRET` | Server + Gate app | Server `GATE_SECRET` == gate-app `PUBLIC_GATE_SECRET` | **Private shared secret** (treat as sensitive) |
+| `JWT_SECRET` | Server only | Nothing else (do not reuse) | **Private server-only signing secret** |
+| `ADMIN_PASSWORD_HASH` | Server only | Generated from your admin password (not plaintext) | Hash string (safe to store server-side; password remains private) |
+| `ADMIN_SESSION_SECRET` | Server only | Nothing else; must be different from `JWT_SECRET` | **Private server-only session secret** |
+
+### Secret generation quick commands
+
+- Shared secrets (`GRABBER_PSK`, `GATE_SECRET`): **minimum 32 random bytes** (64 preferred for long-term rotation windows)
+  - `openssl rand -base64 32`
+  - `python3 -c "import secrets; print(secrets.token_urlsafe(32))"`
+- Server-only signing/session secrets (`JWT_SECRET`, `ADMIN_SESSION_SECRET`): **64 random bytes preferred**
+  - `openssl rand -base64 64`
+  - `python3 -c "import secrets; print(secrets.token_urlsafe(64))"`
+- Admin password hash (`ADMIN_PASSWORD_HASH`, Argon2id PHC):
+  - `pip install argon2-cffi`
+  - `python3 -c "from argon2 import PasswordHasher; print(PasswordHasher().hash('paste-password-from-password-manager'))"`
 
 ## Telemetry flow
 
@@ -139,7 +161,7 @@ Set the result as `ADMIN_PASSWORD_HASH`.
 ### 2. Generate a session signing secret
 
 ```bash
-openssl rand -hex 32
+openssl rand -base64 64
 ```
 
 Set the result as `ADMIN_SESSION_SECRET`.

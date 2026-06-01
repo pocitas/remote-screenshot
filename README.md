@@ -9,12 +9,17 @@ A small remote screenshot system with three core pieces:
 ## System overview
 
 1. A client first requests a JWT from `POST /api/gate/token` using `X-Gate-Secret`.
-2. The client calls `GET /api/screenshot` with `Authorization: ******3. The server sends a WebSocket capture command to the connected grabber and includes a generated `request_id`.
+2. The client calls `GET /api/screenshot` with `Authorization: ******
+3. The server sends a WebSocket capture command to the connected grabber and includes a generated `request_id`.
 4. The grabber captures a frame, computes SSIM scores against each configured reference image, and decides `pass` or `fail`.
-5. The grabber sends two WebSocket messages back on the existing connection:
-   - the JPEG image as a binary message
-   - a telemetry JSON message containing scores, threshold, decision, request ID, grabber ID, and failed image data if validation failed
-6. The server returns the binary screenshot to the API caller, saves telemetry into SQLite, stores failed images on disk, and exposes the data in the admin UI.
+5. The grabber sends result messages back on the existing connection:
+   - on validation pass: the JPEG image as a binary message
+   - on validation fail: a JSON message with `type=capture_result`, `status=validation_failed`, and a user-safe message
+   - telemetry JSON containing scores, threshold, decision, request ID, grabber ID, and failed image data if validation failed
+6. The server returns either:
+   - `image/jpeg` bytes when validation passes
+   - JSON like `{"status":"validation_failed","message":"..."}` when validation fails
+7. The server saves telemetry into SQLite, stores failed images on disk, and exposes the data in the admin UI.
 
 ## Environment variables
 
@@ -27,7 +32,6 @@ A small remote screenshot system with three core pieces:
 - `SIMILARITY_THRESHOLD` - minimum SSIM score required to pass validation. Default: `0.80`
 - `REFERENCE_IMAGE_1`, `REFERENCE_IMAGE_2`, `REFERENCE_IMAGE_3` - grayscale reference images used for SSIM comparison
 - `FAILED_IMAGES_DIR` - local grabber directory where failed source frames are written before telemetry upload. Default: `failed_captures`
-- `PLACEHOLDER_WIDTH`, `PLACEHOLDER_HEIGHT` - placeholder image size when validation fails. Defaults: `1280x720`
 
 ### Server
 
@@ -73,7 +77,18 @@ For each capture request:
 - the server generates a `request_id`
 - the server sends `{"cmd":"capture","request_id":"..."}` to the grabber
 - the grabber captures a frame and computes SSIM scores for each configured reference image
-- the grabber sends the JPEG screenshot as a binary WebSocket frame
+- on validation pass, the grabber sends the JPEG screenshot as a binary WebSocket frame
+- on validation fail, the grabber sends a JSON WebSocket frame:
+
+```json
+{
+  "type": "capture_result",
+  "request_id": "4a8d0e5c0db54b3b8d6d1d1ef1dca123",
+  "status": "validation_failed",
+  "message": "Screenshot rejected by validator. A new capture will be requested automatically."
+}
+```
+
 - the grabber then sends a JSON telemetry frame like:
 
 ```json
@@ -239,5 +254,5 @@ screens.example.com {
 ## Notes
 
 - Screenshot responses are cached in memory on the server for 1 minute (`cacheTTL`)
-- A validation `fail` sends a placeholder image to the screenshot API caller while preserving the original failed frame in telemetry
-- Telemetry is best-effort; screenshot delivery still uses the binary WebSocket message first
+- A validation `fail` returns JSON with `status=validation_failed` and a user-safe message, while preserving the original failed frame in telemetry
+- Telemetry is best-effort; successful screenshot delivery still uses the binary WebSocket message first

@@ -22,8 +22,6 @@ REFERENCE_IMAGE_PATHS = (
 )
 FAILED_IMAGES_DIR = os.getenv("FAILED_IMAGES_DIR", "failed_captures")
 GRABBER_ID = os.getenv("GRABBER_ID", "")
-PLACEHOLDER_WIDTH = int(os.getenv("PLACEHOLDER_WIDTH", "1280"))
-PLACEHOLDER_HEIGHT = int(os.getenv("PLACEHOLDER_HEIGHT", "720"))
 
 REFERENCE_IMAGES: list[np.ndarray] = []
 
@@ -39,15 +37,6 @@ def load_reference_images() -> None:
     REFERENCE_IMAGES.clear()
     REFERENCE_IMAGES.extend(loaded_images)
     print(f"loaded {len(REFERENCE_IMAGES)} reference image(s)")
-
-
-def placeholder_jpeg_bytes() -> Optional[bytes]:
-    placeholder = np.zeros((PLACEHOLDER_HEIGHT, PLACEHOLDER_WIDTH, 3), dtype=np.uint8)
-    encoded_ok, buffer = cv2.imencode(".jpg", placeholder, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
-    if not encoded_ok:
-        print("placeholder jpeg encoding failed")
-        return None
-    return buffer.tobytes()
 
 
 def verify_frame_similarity(frame: np.ndarray) -> dict:
@@ -111,17 +100,17 @@ def save_failed_frame(frame: np.ndarray, request_id: str) -> tuple[Optional[str]
     return relative_path, image_bytes
 
 
-def capture_jpeg_bytes(request_id: str) -> tuple[Optional[bytes], Optional[dict]]:
+def capture_jpeg_bytes(request_id: str) -> tuple[Optional[bytes], Optional[dict], Optional[str]]:
     cap = cv2.VideoCapture(0)
     if not cap.isOpened():
         print("video capture device not available")
-        return None, None
+        return None, None, None
 
     ok, frame = cap.read()
     cap.release()
     if not ok or frame is None:
         print("failed to read frame")
-        return None, None
+        return None, None, None
 
     similarity = verify_frame_similarity(frame)
     telemetry = {
@@ -138,19 +127,19 @@ def capture_jpeg_bytes(request_id: str) -> tuple[Optional[bytes], Optional[dict]
     }
 
     if similarity["decision"] == "fail":
-        print("frame did not pass SSIM validation, sending placeholder")
+        print("frame did not pass SSIM validation")
         failed_image_filename, failed_image_bytes = save_failed_frame(frame, request_id)
         if failed_image_filename is not None and failed_image_bytes is not None:
             telemetry["failed_image_filename"] = failed_image_filename
             telemetry["failed_image_data"] = base64.b64encode(failed_image_bytes).decode("ascii")
-        return placeholder_jpeg_bytes(), telemetry
+        return None, telemetry, "Screenshot rejected by validator. A new capture will be requested automatically."
 
     encoded_ok, buffer = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
     if not encoded_ok:
         print("jpeg encoding failed")
-        return None, telemetry
+        return None, telemetry, None
 
-    return buffer.tobytes(), telemetry
+    return buffer.tobytes(), telemetry, None
 
 
 async def handle_messages(ws: websockets.WebSocketClientProtocol) -> None:
@@ -169,12 +158,25 @@ async def handle_messages(ws: websockets.WebSocketClientProtocol) -> None:
             continue
 
         request_id = str(payload.get("request_id", ""))
-        image_bytes, telemetry = capture_jpeg_bytes(request_id)
-        if image_bytes is None:
+        image_bytes, telemetry, validation_failure_message = capture_jpeg_bytes(request_id)
+        if image_bytes is not None:
+            await ws.send(image_bytes)
+            print(f"sent screenshot ({len(image_bytes)} bytes)")
+        elif validation_failure_message:
+            await ws.send(
+                json.dumps(
+                    {
+                        "type": "capture_result",
+                        "request_id": request_id,
+                        "status": "validation_failed",
+                        "message": validation_failure_message,
+                    }
+                )
+            )
+            print(f"sent validation failure request_id={request_id}")
+        else:
             continue
 
-        await ws.send(image_bytes)
-        print(f"sent screenshot ({len(image_bytes)} bytes)")
         if telemetry is not None:
             await ws.send(json.dumps(telemetry))
             print(f"sent telemetry request_id={request_id} decision={telemetry['decision']}")

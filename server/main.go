@@ -25,9 +25,10 @@ type serverState struct {
 
 	mu             sync.Mutex
 	grabberConn    *websocket.Conn
-	lastScreenshot []byte
+	lastCapture    captureResult
 	lastCaptureAt  time.Time
-	pendingCapture chan []byte
+	pendingCapture chan captureResult
+	pendingReqID   string
 
 	captureMu sync.Mutex
 
@@ -35,6 +36,23 @@ type serverState struct {
 	failedImagesDir    string
 	adminPasswordHash  string
 	adminSessionSecret []byte
+}
+
+type captureResult struct {
+	Image             []byte
+	ValidationFailure *validationFailureResponse
+}
+
+type validationFailureResponse struct {
+	Status  string `json:"status"`
+	Message string `json:"message"`
+}
+
+type captureResultMsg struct {
+	Type      string `json:"type"`
+	RequestID string `json:"request_id"`
+	Status    string `json:"status"`
+	Message   string `json:"message"`
 }
 
 var upgrader = websocket.Upgrader{
@@ -136,13 +154,50 @@ func (s *serverState) readGrabberLoop(conn *websocket.Conn) {
 				continue
 			}
 			select {
-			case pending <- payload:
+			case pending <- captureResult{Image: payload}:
 			default:
 			}
 		} else if messageType == websocket.TextMessage {
+			if s.handleCaptureResultMessage(payload) {
+				continue
+			}
 			go s.handleTelemetryMessage(payload)
 		}
 	}
+}
+
+func (s *serverState) handleCaptureResultMessage(payload []byte) bool {
+	var msg captureResultMsg
+	if err := json.Unmarshal(payload, &msg); err != nil {
+		return false
+	}
+	if msg.Type != "capture_result" || msg.Status != "validation_failed" || msg.RequestID == "" {
+		return false
+	}
+
+	s.mu.Lock()
+	pending := s.pendingCapture
+	pendingReqID := s.pendingReqID
+	s.mu.Unlock()
+	if pending == nil || pendingReqID != msg.RequestID {
+		return true
+	}
+
+	response := captureResult{
+		ValidationFailure: &validationFailureResponse{
+			Status:  msg.Status,
+			Message: strings.TrimSpace(msg.Message),
+		},
+	}
+	if response.ValidationFailure.Message == "" {
+		response.ValidationFailure.Message = "Screenshot rejected by validator."
+	}
+
+	select {
+	case pending <- response:
+	default:
+	}
+	return true
 }
 
 func (s *serverState) handleGateToken(w http.ResponseWriter, r *http.Request) {
@@ -195,7 +250,7 @@ func (s *serverState) handleScreenshot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	image, err := s.getScreenshot(r.Context())
+	result, err := s.getScreenshot(r.Context())
 	if err != nil {
 		if errors.Is(err, errNoGrabberConnection) {
 			http.Error(w, "grabber is not connected", http.StatusServiceUnavailable)
@@ -205,17 +260,24 @@ func (s *serverState) handleScreenshot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if result.ValidationFailure != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-store")
+		_ = json.NewEncoder(w).Encode(result.ValidationFailure)
+		return
+	}
+
 	w.Header().Set("Content-Type", "image/jpeg")
 	w.Header().Set("Cache-Control", "no-store")
-	_, _ = w.Write(image)
+	_, _ = w.Write(result.Image)
 }
 
 var errNoGrabberConnection = errors.New("no grabber connection")
 
-func (s *serverState) getScreenshot(ctx context.Context) ([]byte, error) {
+func (s *serverState) getScreenshot(ctx context.Context) (captureResult, error) {
 	s.mu.Lock()
-	if len(s.lastScreenshot) > 0 && time.Since(s.lastCaptureAt) < s.cacheTTL {
-		cached := append([]byte(nil), s.lastScreenshot...)
+	if time.Since(s.lastCaptureAt) < s.cacheTTL && (len(s.lastCapture.Image) > 0 || s.lastCapture.ValidationFailure != nil) {
+		cached := cloneCaptureResult(s.lastCapture)
 		s.mu.Unlock()
 		return cached, nil
 	}
@@ -225,8 +287,8 @@ func (s *serverState) getScreenshot(ctx context.Context) ([]byte, error) {
 	defer s.captureMu.Unlock()
 
 	s.mu.Lock()
-	if len(s.lastScreenshot) > 0 && time.Since(s.lastCaptureAt) < s.cacheTTL {
-		cached := append([]byte(nil), s.lastScreenshot...)
+	if time.Since(s.lastCaptureAt) < s.cacheTTL && (len(s.lastCapture.Image) > 0 || s.lastCapture.ValidationFailure != nil) {
+		cached := cloneCaptureResult(s.lastCapture)
 		s.mu.Unlock()
 		return cached, nil
 	}
@@ -234,38 +296,53 @@ func (s *serverState) getScreenshot(ctx context.Context) ([]byte, error) {
 	conn := s.grabberConn
 	if conn == nil {
 		s.mu.Unlock()
-		return nil, errNoGrabberConnection
+		return captureResult{}, errNoGrabberConnection
 	}
+	reqID := generateRandomToken()
 
-	response := make(chan []byte, 1)
+	response := make(chan captureResult, 1)
 	s.pendingCapture = response
+	s.pendingReqID = reqID
 	s.mu.Unlock()
 
 	defer func() {
 		s.mu.Lock()
 		if s.pendingCapture == response {
 			s.pendingCapture = nil
+			s.pendingReqID = ""
 		}
 		s.mu.Unlock()
 	}()
 
-	reqID := generateRandomToken()
 	if err := conn.WriteJSON(map[string]string{"cmd": "capture", "request_id": reqID}); err != nil {
-		return nil, err
+		return captureResult{}, err
 	}
 
 	select {
-	case img := <-response:
+	case result := <-response:
 		s.mu.Lock()
-		s.lastScreenshot = append([]byte(nil), img...)
+		s.lastCapture = cloneCaptureResult(result)
 		s.lastCaptureAt = time.Now()
 		s.mu.Unlock()
-		return img, nil
+		return result, nil
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		return captureResult{}, ctx.Err()
 	case <-time.After(20 * time.Second):
-		return nil, errors.New("timed out waiting for grabber")
+		return captureResult{}, errors.New("timed out waiting for grabber")
 	}
+}
+
+func cloneCaptureResult(result captureResult) captureResult {
+	cloned := captureResult{
+		Image: append([]byte(nil), result.Image...),
+	}
+	if result.ValidationFailure != nil {
+		cloned.ValidationFailure = &validationFailureResponse{
+			Status:  result.ValidationFailure.Status,
+			Message: result.ValidationFailure.Message,
+		}
+	}
+	return cloned
 }
 
 func (s *serverState) validJWT(tokenString string) bool {

@@ -79,10 +79,16 @@ var logsTmpl = template.Must(template.New("logs").Funcs(template.FuncMap{
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:system-ui,sans-serif;background:#f0f2f5;color:#1a1a2e}
-header{background:#4f46e5;color:#fff;padding:1rem 1.5rem;display:flex;justify-content:space-between;align-items:center}
+header{background:#4f46e5;color:#fff;padding:1rem 1.5rem;display:flex;justify-content:space-between;align-items:center;gap:1rem}
 header h1{font-size:1.2rem}
+.header-left{display:flex;align-items:center;gap:1rem}
+.nav a{color:#fff;text-decoration:none;background:rgba(255,255,255,.2);padding:.3rem .7rem;border-radius:4px;font-size:.85rem}
+.nav a.active{background:rgba(255,255,255,.35)}
 .logout{color:#fff;font-size:.875rem;text-decoration:none;background:rgba(255,255,255,.2);padding:.3rem .8rem;border-radius:4px;border:none;cursor:pointer}
 .container{max-width:1400px;margin:1.5rem auto;padding:0 1rem}
+.error,.message{margin-bottom:1rem;padding:.6rem .8rem;border-radius:4px;font-size:.85rem}
+.error{background:#fee2e2;color:#b91c1c}
+.message{background:#dcfce7;color:#166534}
 .filters{background:#fff;border-radius:8px;padding:1rem 1.5rem;margin-bottom:1rem;box-shadow:0 1px 4px rgba(0,0,0,.08)}
 .filters form{display:flex;flex-wrap:wrap;gap:.75rem;align-items:flex-end}
 .filters label{font-size:.8rem;font-weight:500;color:#555}
@@ -109,12 +115,20 @@ tr:hover td{background:#fafbfc}
 </head>
 <body>
 <header>
-  <h1>📊 Validation Logs</h1>
+  <div class="header-left">
+    <h1>📊 Validation Logs</h1>
+    <nav class="nav">
+      <a class="active" href="/admin/logs">Validation logs</a>
+      <a href="/admin/references">References</a>
+    </nav>
+  </div>
   <form method="POST" action="/admin/logout" style="margin:0">
     <button class="logout" type="submit">Log out</button>
   </form>
 </header>
 <div class="container">
+  {{if .Error}}<div class="error">{{.Error}}</div>{{end}}
+  {{if .Message}}<div class="message">{{.Message}}</div>{{end}}
   <div class="filters">
     <form method="GET" action="/admin/logs">
       <div><label>From<br><input type="datetime-local" name="from" value="{{.FilterFrom}}"></label></div>
@@ -157,7 +171,12 @@ tr:hover td{background:#fafbfc}
         <td class="mono">{{scoresStr .Scores}}</td>
         <td class="mono" title="{{.RequestID}}">{{slice .RequestID 0 8}}…</td>
         <td>{{.GrabberID}}</td>
-        <td>{{if .FailedImagePath}}<a class="img-link" href="/admin/failed-images/{{.FailedImagePath}}" target="_blank">view</a>{{else}}—{{end}}</td>
+        <td>{{if .FailedImagePath}}<a class="img-link" href="/admin/failed-images/{{.FailedImagePath}}" target="_blank">view</a>
+          <form method="POST" action="/admin/references/add-failed" style="display:inline;margin-left:.4rem">
+            <input type="hidden" name="failed_image_path" value="{{.FailedImagePath}}">
+            <button style="font-size:.72rem;padding:.2rem .4rem;background:#4f46e5;color:#fff;border:none;border-radius:4px;cursor:pointer" type="submit">add as reference</button>
+          </form>
+        {{else}}—{{end}}</td>
       </tr>
       {{else}}<tr><td colspan="8" style="text-align:center;padding:2rem;color:#999">No log entries found.</td></tr>{{end}}
       </tbody>
@@ -252,6 +271,8 @@ func (s *serverState) handleAdminLogs(w http.ResponseWriter, r *http.Request) {
 		"FilterFrom":     fromStr,
 		"FilterTo":       toStr,
 		"FilterDecision": decision,
+		"Message":        r.URL.Query().Get("msg"),
+		"Error":          r.URL.Query().Get("err"),
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := logsTmpl.Execute(w, data); err != nil {

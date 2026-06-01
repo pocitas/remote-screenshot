@@ -2,7 +2,7 @@
 
 A small remote screenshot system with three core pieces:
 
-- **Grabber** (`grabber/grabber.py`) connects to the server over WebSocket, captures a frame, compares it to reference images with SSIM, and sends the screenshot plus validation telemetry.
+- **Grabber** (`grabber/grabber.py`) connects to the server over WebSocket, captures a frame, compares it to reference images with SSIM, and sends screenshot/telemetry/reference-management responses.
 - **Server** (`server/`) exposes the screenshot API, accepts grabber connections, stores validation logs in SQLite, retains failed captures for 7 days, and serves the admin UI.
 - **Admin UI** (`/admin/*`) lets operators review validation history, filter results, inspect pass/fail rates, and open failed images.
 
@@ -30,7 +30,7 @@ A small remote screenshot system with three core pieces:
 - `GRABBER_ID` - optional operator-friendly identifier stored with telemetry (example: `pi-01`). Default: empty
 - `RECONNECT_DELAY_SECONDS` - reconnect wait after disconnect/error. Default: `5`
 - `SIMILARITY_THRESHOLD` - minimum SSIM score required to pass validation. Default: `0.80`
-- `REFERENCE_IMAGE_1`, `REFERENCE_IMAGE_2`, `REFERENCE_IMAGE_3` - grayscale reference images used for SSIM comparison
+- `REFERENCE_IMAGES_DIR` - directory containing reference images used for SSIM comparison (all supported image files are loaded; no fixed limit). Default: `references`
 - `FAILED_IMAGES_DIR` - local grabber directory where failed source frames are written before telemetry upload. Default: `failed_captures`
 
 ### Server
@@ -116,6 +116,10 @@ The server stores:
 - telemetry metadata in SQLite `validation_logs`
 - failed image bytes on disk under `FAILED_IMAGES_DIR`
 
+## Reference management transport
+
+Reference management reuses the existing authenticated grabber WebSocket instead of introducing a separate grabber HTTP service. This keeps deployment simpler (single grabber connection/PSK/auth path) while still enabling remote admin workflows from the server/admin UI.
+
 ## Failed image storage
 
 ### On the grabber
@@ -163,6 +167,11 @@ The admin UI is served from:
 - `POST /admin/logout`
 - `GET /admin/logs`
 - `GET /admin/failed-images/<relative-path>`
+- `GET /admin/references`
+- `POST /admin/references/capture`
+- `POST /admin/references/delete`
+- `POST /admin/references/add-failed`
+- `GET /admin/references/image/<reference-name>`
 
 ### 1. Generate an Argon2id password hash
 
@@ -204,6 +213,14 @@ The validation logs page includes:
 - reference score display for each capture
 - request ID preview and grabber ID display
 - direct links to stored failed images for failed validations
+- one-click action to promote a failed image to a reference image on the grabber
+
+The reference management page includes:
+
+- list of current grabber reference images
+- preview links for reference images
+- capture-current-frame action to create a new reference on grabber
+- delete action for any reference image
 
 ## Database schema
 

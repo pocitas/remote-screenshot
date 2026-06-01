@@ -31,6 +31,11 @@ type serverState struct {
 	pendingReqID   string
 
 	captureMu sync.Mutex
+	wsWriteMu sync.Mutex
+
+	referenceMu           sync.Mutex
+	pendingReference      chan referenceResultMsg
+	pendingReferenceReqID string
 
 	db                 *sql.DB
 	failedImagesDir    string
@@ -53,6 +58,17 @@ type captureResultMsg struct {
 	RequestID string `json:"request_id"`
 	Status    string `json:"status"`
 	Message   string `json:"message"`
+}
+
+type referenceResultMsg struct {
+	Type        string   `json:"type"`
+	RequestID   string   `json:"request_id"`
+	Status      string   `json:"status"`
+	Action      string   `json:"action"`
+	Name        string   `json:"name"`
+	Error       string   `json:"error"`
+	References  []string `json:"references"`
+	ImageBase64 string   `json:"image_base64"`
 }
 
 var upgrader = websocket.Upgrader{
@@ -91,6 +107,11 @@ func main() {
 	mux.HandleFunc("/admin/logout", state.handleAdminLogout)
 	mux.HandleFunc("/admin/logs", state.handleAdminLogs)
 	mux.HandleFunc("/admin/failed-images/", state.handleFailedImages)
+	mux.HandleFunc("/admin/references", state.handleAdminReferences)
+	mux.HandleFunc("/admin/references/capture", state.handleAdminReferenceCapture)
+	mux.HandleFunc("/admin/references/delete", state.handleAdminReferenceDelete)
+	mux.HandleFunc("/admin/references/add-failed", state.handleAdminReferenceAddFailed)
+	mux.HandleFunc("/admin/references/image/", state.handleAdminReferenceImage)
 
 	addr := envOrDefault("ADDR", ":8080")
 	log.Printf("server listening on %s", addr)
@@ -159,6 +180,9 @@ func (s *serverState) readGrabberLoop(conn *websocket.Conn) {
 			}
 		} else if messageType == websocket.TextMessage {
 			if s.handleCaptureResultMessage(payload) {
+				continue
+			}
+			if s.handleReferenceResultMessage(payload) {
 				continue
 			}
 			go s.handleTelemetryMessage(payload)
@@ -314,7 +338,10 @@ func (s *serverState) getScreenshot(ctx context.Context) (captureResult, error) 
 		s.mu.Unlock()
 	}()
 
-	if err := conn.WriteJSON(map[string]string{"cmd": "capture", "request_id": reqID}); err != nil {
+	s.wsWriteMu.Lock()
+	err := conn.WriteJSON(map[string]string{"cmd": "capture", "request_id": reqID})
+	s.wsWriteMu.Unlock()
+	if err != nil {
 		return captureResult{}, err
 	}
 
